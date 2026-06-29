@@ -81,12 +81,12 @@ function getTursoHelperScript(): string {
   const authToken = process.env.TURSO_AUTH_TOKEN || "";
 
   tursoHelperScript = `
-const { createClient } = require("@libsql/client");
+const input = JSON.parse(process.argv[2]);
+const { createClient } = require(input.modPath);
 const client = createClient({
   url: ${JSON.stringify(dbUrl)},
   authToken: ${JSON.stringify(authToken)},
 });
-const input = JSON.parse(process.argv[2]);
 
 async function main() {
   if (input.batch) {
@@ -105,7 +105,7 @@ async function main() {
   }
 }
 main().catch((e) => {
-  process.stderr.write(e.stack || e.message);
+  process.stderr.write(e?.stack || e?.message || String(e));
   process.exit(1);
 });
 `;
@@ -124,11 +124,11 @@ function runTurso(sql: string, params: unknown[]): {
     require("fs").writeFileSync(tmpFile, script);
   }
 
-  const argsJson = JSON.stringify({ sql, params });
-  const nodePath = path.join(process.cwd(), "node_modules");
+  const modPath = require.resolve("@libsql/client");
+  const argsJson = JSON.stringify({ sql, params, modPath });
   const output = execSync(
     `node "${tmpFile}" '${argsJson.replace(/'/g, "'\\'")}'`,
-    { timeout: 15000, encoding: "utf-8", env: { ...process.env, NODE_PATH: nodePath } }
+    { timeout: 15000, encoding: "utf-8" }
   );
   return JSON.parse(output);
 }
@@ -141,11 +141,11 @@ function runTursoBatch(statements: { sql: string; params: unknown[] }[]): void {
     require("fs").writeFileSync(tmpFile, script);
   }
 
-  const argsJson = JSON.stringify({ batch: statements });
-  const nodePath = path.join(process.cwd(), "node_modules");
+  const modPath = require.resolve("@libsql/client");
+  const argsJson = JSON.stringify({ batch: statements, modPath });
   execSync(
     `node "${tmpFile}" '${argsJson.replace(/'/g, "'\\'")}'`,
-    { timeout: 30000, encoding: "utf-8", env: { ...process.env, NODE_PATH: nodePath } }
+    { timeout: 30000, encoding: "utf-8" }
   );
 }
 
