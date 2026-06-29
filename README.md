@@ -336,3 +336,7 @@ src/
 ## 📝 License
 
 MIT
+
+---
+
+> **build by Halima Hafir**
