@@ -176,7 +176,10 @@ function createTursoAdapter(): DbAdapter {
       };
     },
     exec(sql: string) {
-      tursoRequest(sql, []);
+      const statements = sql.split(";").filter((s) => s.trim().length > 0);
+      for (const stmt of statements) {
+        tursoRequest(stmt, []);
+      }
     },
     transaction<T>(fn: () => T): T {
       return fn();
