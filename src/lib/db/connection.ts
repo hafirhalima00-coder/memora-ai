@@ -127,7 +127,7 @@ function runTurso(sql: string, params: unknown[]): {
   const argsJson = JSON.stringify({ sql, params });
   const output = execSync(
     `node "${tmpFile}" '${argsJson.replace(/'/g, "'\\'")}'`,
-    { timeout: 15000, encoding: "utf-8" }
+    { timeout: 15000, encoding: "utf-8", cwd: process.cwd() }
   );
   return JSON.parse(output);
 }
@@ -143,7 +143,7 @@ function runTursoBatch(statements: { sql: string; params: unknown[] }[]): void {
   const argsJson = JSON.stringify({ batch: statements });
   execSync(
     `node "${tmpFile}" '${argsJson.replace(/'/g, "'\\'")}'`,
-    { timeout: 30000, encoding: "utf-8" }
+    { timeout: 30000, encoding: "utf-8", cwd: process.cwd() }
   );
 }
 
