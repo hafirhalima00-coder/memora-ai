@@ -3,7 +3,7 @@
  * 
  * Synchronous adapter supporting two modes:
  * 1. Local: Uses better-sqlite3 (file-based SQLite) for development
- * 2. Serverless: Uses @libsql/client via child_process (sync wrapper) for Vercel
+ * 2. Serverless: Uses curl via execSync to Turso HTTP API for Vercel
  * 
  * Set TURSO_DB_URL env var to use Turso serverless mode.
  */
@@ -54,9 +54,9 @@ function createLocalAdapter(): DbAdapter {
     prepare(sql: string) {
       const stmt = raw.prepare(sql);
       return {
-        get: (...params) => stmt.get(...params) as unknown,
-        all: (...params) => stmt.all(...params) as unknown[],
-        run: (...params) => stmt.run(...params) as { changes: number; lastInsertRowid?: number | bigint },
+        get: (...params: unknown[]) => stmt.get(...params) as unknown,
+        all: (...params: unknown[]) => stmt.all(...params) as unknown[],
+        run: (...params: unknown[]) => stmt.run(...params) as { changes: number; lastInsertRowid?: number | bigint },
       };
     },
     exec(sql: string) { raw.exec(sql); },
@@ -69,90 +69,88 @@ function createLocalAdapter(): DbAdapter {
 }
 
 // ============================================
-// Turso Serverless Adapter (sync via child_process)
+// Turso Serverless Adapter (sync via curl)
 // ============================================
 
-let tursoHelperScript: string | null = null;
+interface TursoResponse {
+  rows?: Record<string, unknown>[];
+  rowsAffected?: number;
+  lastInsertRowid?: number | bigint | null;
+}
 
-function getTursoHelperScript(): string {
-  if (tursoHelperScript) return tursoHelperScript;
-
-  const dbUrl = process.env.TURSO_DB_URL || "";
+function tursoRequest(sql: string, params: unknown[]): TursoResponse {
+  const dbUrl = (process.env.TURSO_DB_URL || "").replace("libsql://", "https://");
   const authToken = process.env.TURSO_AUTH_TOKEN || "";
 
-  tursoHelperScript = `
-const input = JSON.parse(process.argv[2]);
-const { createClient } = require(input.modPath);
-const client = createClient({
-  url: ${JSON.stringify(dbUrl)},
-  authToken: ${JSON.stringify(authToken)},
-});
+  // Build the Hrana-protocol request body
+  const body = JSON.stringify({
+    requests: [
+      {
+        type: "execute",
+        stmt: {
+          sql,
+          args: params.map((p: unknown) => {
+            if (p === null || p === undefined) return { type: "null" };
+            if (typeof p === "number") return { type: "integer", value: String(p) };
+            return { type: "text", value: String(p) };
+          }),
+        },
+      },
+    ],
+  });
 
-async function main() {
-  if (input.batch) {
-    for (const stmt of input.batch) {
-      await client.execute({ sql: stmt.sql, args: stmt.params || [] });
+  // Escape for shell single quotes
+  const safeBody = body.replace(/'/g, "'\\''");
+
+  try {
+    const output = execSync(
+      `curl -s -w "\\n%{http_code}" "${dbUrl}/v2/pipeline" \
+        -H "Authorization: Bearer ${authToken}" \
+        -H "Content-Type: application/json" \
+        -d '${safeBody}'`,
+      { timeout: 15000, encoding: "utf-8" }
+    );
+
+    // Extract HTTP status code (last line) and body (everything before it)
+    const lines = output.trim().split("\n");
+    const httpCode = parseInt(lines[lines.length - 1], 10);
+    const responseBody = lines.slice(0, -1).join("\n");
+
+    if (httpCode !== 200) {
+      throw new Error(`Turso HTTP ${httpCode}: ${responseBody}`);
     }
-    process.stdout.write(JSON.stringify({ ok: true }));
-  } else {
-    const r = await client.execute({ sql: input.sql, args: input.params || [] });
-    process.stdout.write(JSON.stringify({
-      rows: r.rows || [],
-      columns: r.columns || [],
-      rowsAffected: r.rowsAffected || 0,
-      lastInsertRowid: r.lastInsertRowid ?? null,
-    }));
+
+    const parsed = JSON.parse(responseBody);
+    const result = parsed.results?.[0]?.response?.result || parsed.results?.[0]?.result || {};
+
+    const cols: { name: string }[] = result.cols || [];
+    const rawRows: { type: string; value: string }[][] = result.rows || [];
+
+    // Convert array-of-objects rows to object-based rows
+    const objectRows = rawRows.map((row) => {
+      const obj: Record<string, unknown> = {};
+      cols.forEach((col, i) => {
+        const cell = row[i];
+        // Cell has { type: "text"|"integer"|"null", value: "..." } or is null
+        obj[col.name] = cell === null || cell?.type === "null" ? null : cell?.value ?? null;
+      });
+      return obj;
+    });
+
+    return {
+      rows: objectRows,
+      rowsAffected: result.affected_row_count ?? 0,
+      lastInsertRowid: result.last_insert_rowid ?? null,
+    };
+  } catch (err: any) {
+    throw new Error(`Turso query failed: ${err.message}`);
   }
-}
-main().catch((e) => {
-  process.stderr.write(e?.stack || e?.message || String(e));
-  process.exit(1);
-});
-`;
-  return tursoHelperScript;
-}
-
-function runTurso(sql: string, params: unknown[]): {
-  rows: Record<string, unknown>[];
-  columns: { name: string; type: string }[];
-  rowsAffected: number;
-  lastInsertRowid: number | bigint | null;
-} {
-  const script = getTursoHelperScript();
-  const tmpFile = `/tmp/turso_${process.pid}.js`;
-  if (!require("fs").existsSync(tmpFile)) {
-    require("fs").writeFileSync(tmpFile, script);
-  }
-
-  const modPath = require.resolve("@libsql/client");
-  const argsJson = JSON.stringify({ sql, params, modPath });
-  const output = execSync(
-    `node "${tmpFile}" '${argsJson.replace(/'/g, "'\\'")}'`,
-    { timeout: 15000, encoding: "utf-8" }
-  );
-  return JSON.parse(output);
-}
-
-function runTursoBatch(statements: { sql: string; params: unknown[] }[]): void {
-  if (statements.length === 0) return;
-  const script = getTursoHelperScript();
-  const tmpFile = `/tmp/turso_${process.pid}.js`;
-  if (!require("fs").existsSync(tmpFile)) {
-    require("fs").writeFileSync(tmpFile, script);
-  }
-
-  const modPath = require.resolve("@libsql/client");
-  const argsJson = JSON.stringify({ batch: statements, modPath });
-  execSync(
-    `node "${tmpFile}" '${argsJson.replace(/'/g, "'\\'")}'`,
-    { timeout: 30000, encoding: "utf-8" }
-  );
 }
 
 function createTursoAdapter(): DbAdapter {
-  // Verify connection by running a test query
+  // Verify connection
   try {
-    runTurso("SELECT 1 AS test", []);
+    tursoRequest("SELECT 1 AS test", []);
   } catch (err: any) {
     throw new Error(`Turso connection failed: ${err.message}`);
   }
@@ -161,15 +159,15 @@ function createTursoAdapter(): DbAdapter {
     prepare(sql: string) {
       return {
         get: (...params: unknown[]) => {
-          const result = runTurso(sql, params);
-          return result.rows.length > 0 ? result.rows[0] : undefined;
+          const result = tursoRequest(sql, params);
+          return result.rows && result.rows.length > 0 ? result.rows[0] : undefined;
         },
         all: (...params: unknown[]) => {
-          const result = runTurso(sql, params);
-          return result.rows;
+          const result = tursoRequest(sql, params);
+          return result.rows || [];
         },
         run: (...params: unknown[]) => {
-          const result = runTurso(sql, params);
+          const result = tursoRequest(sql, params);
           return {
             changes: result.rowsAffected || 0,
             lastInsertRowid: result.lastInsertRowid ?? undefined,
@@ -178,14 +176,13 @@ function createTursoAdapter(): DbAdapter {
       };
     },
     exec(sql: string) {
-      const statements = sql.split(";").filter((s) => s.trim().length > 0);
-      runTursoBatch(statements.map(s => ({ sql: s, params: [] })));
+      tursoRequest(sql, []);
     },
     transaction<T>(fn: () => T): T {
       return fn();
     },
     close() {
-      // Nothing to close for Turso adapter
+      // Nothing to close for HTTP adapter
     },
   };
 }
