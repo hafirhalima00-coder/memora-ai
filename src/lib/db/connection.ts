@@ -91,7 +91,10 @@ function tursoRequest(sql: string, params: unknown[]): TursoResponse {
           sql,
           args: params.map((p: unknown) => {
             if (p === null || p === undefined) return { type: "null" };
-            if (typeof p === "number") return { type: "integer", value: String(p) };
+            if (typeof p === "number") {
+              if (Number.isInteger(p)) return { type: "integer", value: String(p) };
+              return { type: "float", value: String(p) };
+            }
             return { type: "text", value: String(p) };
           }),
         },
