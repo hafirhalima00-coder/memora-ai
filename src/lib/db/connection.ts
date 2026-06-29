@@ -1,17 +1,18 @@
 /**
  * Memora AI - Database Connection
  * 
- * Supports two modes:
+ * Synchronous adapter supporting two modes:
  * 1. Local: Uses better-sqlite3 (file-based SQLite) for development
- * 2. Serverless: Uses @libsql/client (Turso) for Vercel/Cloudflare deployment
+ * 2. Serverless: Uses @libsql/client via child_process (sync wrapper) for Vercel
  * 
- * Set TURSO_DB_URL and TURSO_AUTH_TOKEN env vars to use Turso mode.
+ * Set TURSO_DB_URL env var to use Turso serverless mode.
  */
 
 import path from "path";
+import { execSync } from "child_process";
 
 // ============================================
-// Database Adapter Interface
+// Database Adapter Interface (synchronous)
 // ============================================
 
 export interface DbAdapter {
@@ -32,12 +33,19 @@ let db: DbAdapter | null = null;
 // ============================================
 
 function createLocalAdapter(): DbAdapter {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const Database = require("better-sqlite3") as any;
+  let Database: any;
+  try {
+    Database = require("better-sqlite3");
+  } catch {
+    throw new Error(
+      "better-sqlite3 not available. Set TURSO_DB_URL + TURSO_AUTH_TOKEN to use Turso."
+    );
+  }
+
   const dbPath = process.env.DATABASE_URL
     ? path.resolve(process.env.DATABASE_URL)
     : path.resolve(process.cwd(), "memora.db");
-  
+
   const raw = new Database(dbPath);
   raw.pragma("journal_mode = WAL");
   raw.pragma("foreign_keys = ON");
@@ -46,72 +54,136 @@ function createLocalAdapter(): DbAdapter {
     prepare(sql: string) {
       const stmt = raw.prepare(sql);
       return {
-        get: (...params: unknown[]) => stmt.get(...params) as unknown,
-        all: (...params: unknown[]) => stmt.all(...params) as unknown[],
-        run: (...params: unknown[]) => stmt.run(...params) as { changes: number; lastInsertRowid?: number | bigint },
+        get: (...params) => stmt.get(...params) as unknown,
+        all: (...params) => stmt.all(...params) as unknown[],
+        run: (...params) => stmt.run(...params) as { changes: number; lastInsertRowid?: number | bigint },
       };
     },
-    exec(sql: string) {
-      raw.exec(sql);
-    },
+    exec(sql: string) { raw.exec(sql); },
     transaction<T>(fn: () => T): T {
       const wrapped = raw.transaction(fn);
       return wrapped();
     },
-    close() {
-      raw.close();
-    },
+    close() { raw.close(); },
   };
 }
 
 // ============================================
-// Turso/libsql Serverless Adapter
+// Turso Serverless Adapter (sync via child_process)
 // ============================================
 
-function createTursoAdapter(): DbAdapter {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { createClient } = require("@libsql/client") as any;
-  
-  const client = createClient({
-    url: process.env.TURSO_DB_URL || "",
-    authToken: process.env.TURSO_AUTH_TOKEN,
-  });
+let tursoHelperScript: string | null = null;
 
-  const clientAny = client as any;
+function getTursoHelperScript(): string {
+  if (tursoHelperScript) return tursoHelperScript;
+
+  const dbUrl = process.env.TURSO_DB_URL || "";
+  const authToken = process.env.TURSO_AUTH_TOKEN || "";
+
+  tursoHelperScript = `
+const { createClient } = require("@libsql/client");
+const client = createClient({
+  url: ${JSON.stringify(dbUrl)},
+  authToken: ${JSON.stringify(authToken)},
+});
+const input = JSON.parse(process.argv[2]);
+
+async function main() {
+  if (input.batch) {
+    for (const stmt of input.batch) {
+      await client.execute({ sql: stmt.sql, args: stmt.params || [] });
+    }
+    process.stdout.write(JSON.stringify({ ok: true }));
+  } else {
+    const r = await client.execute({ sql: input.sql, args: input.params || [] });
+    process.stdout.write(JSON.stringify({
+      rows: r.rows || [],
+      columns: r.columns || [],
+      rowsAffected: r.rowsAffected || 0,
+      lastInsertRowid: r.lastInsertRowid ?? null,
+    }));
+  }
+}
+main().catch((e) => {
+  process.stderr.write(e.stack || e.message);
+  process.exit(1);
+});
+`;
+  return tursoHelperScript;
+}
+
+function runTurso(sql: string, params: unknown[]): {
+  rows: Record<string, unknown>[];
+  columns: { name: string; type: string }[];
+  rowsAffected: number;
+  lastInsertRowid: number | bigint | null;
+} {
+  const script = getTursoHelperScript();
+  const tmpFile = `/tmp/turso_${process.pid}.js`;
+  if (!require("fs").existsSync(tmpFile)) {
+    require("fs").writeFileSync(tmpFile, script);
+  }
+
+  const argsJson = JSON.stringify({ sql, params });
+  const output = execSync(
+    `node "${tmpFile}" '${argsJson.replace(/'/g, "'\\'")}'`,
+    { timeout: 15000, encoding: "utf-8" }
+  );
+  return JSON.parse(output);
+}
+
+function runTursoBatch(statements: { sql: string; params: unknown[] }[]): void {
+  if (statements.length === 0) return;
+  const script = getTursoHelperScript();
+  const tmpFile = `/tmp/turso_${process.pid}.js`;
+  if (!require("fs").existsSync(tmpFile)) {
+    require("fs").writeFileSync(tmpFile, script);
+  }
+
+  const argsJson = JSON.stringify({ batch: statements });
+  execSync(
+    `node "${tmpFile}" '${argsJson.replace(/'/g, "'\\'")}'`,
+    { timeout: 30000, encoding: "utf-8" }
+  );
+}
+
+function createTursoAdapter(): DbAdapter {
+  // Verify connection by running a test query
+  try {
+    runTurso("SELECT 1 AS test", []);
+  } catch (err: any) {
+    throw new Error(`Turso connection failed: ${err.message}`);
+  }
 
   return {
     prepare(sql: string) {
       return {
         get: (...params: unknown[]) => {
-          const result = clientAny.execute({ sql, args: params });
-          const rows = result.rows || [];
-          return rows.length > 0 ? rows[0] : undefined;
+          const result = runTurso(sql, params);
+          return result.rows.length > 0 ? result.rows[0] : undefined;
         },
         all: (...params: unknown[]) => {
-          const result = clientAny.execute({ sql, args: params });
-          return result.rows || [];
+          const result = runTurso(sql, params);
+          return result.rows;
         },
         run: (...params: unknown[]) => {
-          const result = clientAny.execute({ sql, args: params });
+          const result = runTurso(sql, params);
           return {
             changes: result.rowsAffected || 0,
-            lastInsertRowid: result.lastInsertRowid,
+            lastInsertRowid: result.lastInsertRowid ?? undefined,
           };
         },
       };
     },
     exec(sql: string) {
-      const statements = sql.split(';').filter(s => s.trim().length > 0);
-      for (const stmt of statements) {
-        clientAny.execute({ sql: stmt, args: [] });
-      }
+      const statements = sql.split(";").filter((s) => s.trim().length > 0);
+      runTursoBatch(statements.map(s => ({ sql: s, params: [] })));
     },
     transaction<T>(fn: () => T): T {
-      // Execute each statement individually since exec splits multi-statement SQL
       return fn();
     },
     close() {
-      clientAny.close();
+      // Nothing to close for Turso adapter
     },
   };
 }
@@ -140,6 +212,7 @@ export function getDb(): DbAdapter {
 
 function initializeSchema(): void {
   if (!db) return;
+
   db.exec(`
     CREATE TABLE IF NOT EXISTS sources (
       id TEXT PRIMARY KEY,
@@ -204,29 +277,34 @@ function initializeSchema(): void {
       new_value TEXT,
       metadata TEXT DEFAULT '{}'
     );
-
-    CREATE INDEX IF NOT EXISTS idx_memories_user ON memories(user_id);
-    CREATE INDEX IF NOT EXISTS idx_memories_status ON memories(verification_status);
-    CREATE INDEX IF NOT EXISTS idx_memories_category ON memories(category);
-    CREATE INDEX IF NOT EXISTS idx_memories_expires ON memories(expires_at);
-    CREATE INDEX IF NOT EXISTS idx_conflicts_memory_a ON memory_conflicts(memory_id_a);
-    CREATE INDEX IF NOT EXISTS idx_conflicts_memory_b ON memory_conflicts(memory_id_b);
-    CREATE INDEX IF NOT EXISTS idx_verifications_memory ON verification_events(memory_id);
-    CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_log(timestamp DESC);
-    CREATE INDEX IF NOT EXISTS idx_audit_entity ON audit_log(entity_type, entity_id);
-    CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_log(action);
   `);
+
+  // Create indexes separately
+  const indexes = [
+    "CREATE INDEX IF NOT EXISTS idx_memories_user ON memories(user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_memories_status ON memories(verification_status)",
+    "CREATE INDEX IF NOT EXISTS idx_memories_category ON memories(category)",
+    "CREATE INDEX IF NOT EXISTS idx_memories_expires ON memories(expires_at)",
+    "CREATE INDEX IF NOT EXISTS idx_conflicts_memory_a ON memory_conflicts(memory_id_a)",
+    "CREATE INDEX IF NOT EXISTS idx_conflicts_memory_b ON memory_conflicts(memory_id_b)",
+    "CREATE INDEX IF NOT EXISTS idx_verifications_memory ON verification_events(memory_id)",
+    "CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_log(timestamp DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_audit_entity ON audit_log(entity_type, entity_id)",
+    "CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_log(action)",
+  ];
+
+  for (const idx of indexes) {
+    try { db.exec(idx); } catch { /* may already exist */ }
+  }
 }
 
 function seedData(): void {
   if (!db) return;
 
-  const sourceCount = db.prepare("SELECT COUNT(*) as count FROM sources").get() as { count: number };
-  if (sourceCount.count > 0) return;
+  const sourceCount = db.prepare("SELECT COUNT(*) as count FROM sources").get() as { count: number } | undefined;
+  if (sourceCount && (sourceCount as any).count > 0) return;
 
-  const insertSource = db.prepare(
-    "INSERT INTO sources (id, name, reliability, type) VALUES (?, ?, ?, ?)"
-  );
+  const insertSource = db.prepare("INSERT INTO sources (id, name, reliability, type) VALUES (?, ?, ?, ?)");
   const insertMemory = db.prepare(
     `INSERT INTO memories (id, user_id, value, category, confidence, source_id, verification_status, 
      confirmation_count, contradiction_count, tags, explanation, created_at, updated_at, last_verified_at, expires_at)
@@ -249,22 +327,22 @@ function seedData(): void {
     insertSource.run("src_import", "Data Import", "low", "import");
 
     const memories = [
-      { id: "mem_001", user_id: "default_user", value: "User lives in Paris, France", category: "location", confidence: 0.85, source_id: "src_user", status: "verified", confirmations: 3, contradictions: 0, tags: '["location","home","paris"]', explanation: "Confirmed by user on multiple occasions. 3 confirmations.", created: "2025-01-15T10:00:00Z", updated: "2025-06-01T10:00:00Z", verified: "2025-06-01T10:00:00Z", expires: "2026-01-15T10:00:00Z" },
-      { id: "mem_002", user_id: "default_user", value: "User works as a software engineer", category: "identity", confidence: 0.9, source_id: "src_user", status: "verified", confirmations: 4, contradictions: 0, tags: '["work","profession","engineering"]', explanation: "Direct user input confirmed multiple times.", created: "2025-01-20T10:00:00Z", updated: "2025-05-15T10:00:00Z", verified: "2025-05-15T10:00:00Z", expires: null },
-      { id: "mem_003", user_id: "default_user", value: "User enjoys hiking on weekends", category: "preference", confidence: 0.6, source_id: "src_ai", status: "unverified", confirmations: 1, contradictions: 0, tags: '["hobby","outdoor","weekend"]', explanation: "Inferred from conversation. Needs confirmation.", created: "2025-02-10T10:00:00Z", updated: "2025-02-10T10:00:00Z", verified: null, expires: "2025-08-10T10:00:00Z" },
-      { id: "mem_004", user_id: "default_user", value: "User prefers dark mode interfaces", category: "preference", confidence: 0.75, source_id: "src_system", status: "verified", confirmations: 2, contradictions: 0, tags: '["preference","ui","dark-mode"]', explanation: "Observed from system settings and confirmed.", created: "2025-02-20T10:00:00Z", updated: "2025-03-10T10:00:00Z", verified: "2025-03-10T10:00:00Z", expires: "2025-08-20T10:00:00Z" },
-      { id: "mem_005", user_id: "default_user", value: "User lives in London, UK", category: "location", confidence: 0.4, source_id: "src_api", status: "conflicting", confirmations: 1, contradictions: 1, tags: '["location","london","uk"]', explanation: "IP geolocation suggests London, but contradicts 'lives in Paris'.", created: "2025-03-01T10:00:00Z", updated: "2025-03-01T10:00:00Z", verified: null, expires: "2025-09-01T10:00:00Z" },
-      { id: "mem_006", user_id: "default_user", value: "User has a cat named Luna", category: "fact", confidence: 0.8, source_id: "src_user", status: "verified", confirmations: 2, contradictions: 0, tags: '["pet","cat","luna"]', explanation: "User explicitly mentioned having a cat.", created: "2025-03-15T10:00:00Z", updated: "2025-04-20T10:00:00Z", verified: "2025-04-20T10:00:00Z", expires: null },
-      { id: "mem_007", user_id: "default_user", value: "User is learning Spanish", category: "goal", confidence: 0.5, source_id: "src_ai", status: "unverified", confirmations: 0, contradictions: 0, tags: '["learning","language","spanish"]', explanation: "Inferred from conversation about Spanish lessons.", created: "2025-04-01T10:00:00Z", updated: "2025-04-01T10:00:00Z", verified: null, expires: "2025-10-01T10:00:00Z" },
-      { id: "mem_008", user_id: "default_user", value: "User avoids processed foods", category: "habit", confidence: 0.35, source_id: "src_ai", status: "unverified", confirmations: 0, contradictions: 1, tags: '["health","diet","food"]', explanation: "Inferred from 2 mentions. Low confidence.", created: "2025-04-10T10:00:00Z", updated: "2025-04-10T10:00:00Z", verified: null, expires: "2025-10-10T10:00:00Z" },
-      { id: "mem_009", user_id: "default_user", value: "User visited Japan in 2024", category: "event", confidence: 0.7, source_id: "src_user", status: "verified", confirmations: 1, contradictions: 0, tags: '["travel","japan","2024"]', explanation: "User mentioned their Japan trip.", created: "2025-04-15T10:00:00Z", updated: "2025-04-15T10:00:00Z", verified: "2025-04-15T10:00:00Z", expires: null },
-      { id: "mem_010", user_id: "default_user", value: "User is 28 years old", category: "fact", confidence: 0.45, source_id: "src_api", status: "conflicting", confirmations: 1, contradictions: 1, tags: '["age","demographics"]', explanation: "Estimated from public profile data. Conflicts with stated age.", created: "2025-04-20T10:00:00Z", updated: "2025-04-20T10:00:00Z", verified: null, expires: "2025-10-20T10:00:00Z" },
-      { id: "mem_011", user_id: "default_user", value: "User reads science fiction novels", category: "preference", confidence: 0.65, source_id: "src_ai", status: "unverified", confirmations: 0, contradictions: 0, tags: '["reading","sci-fi","books"]', explanation: "Inferred from discussion of sci-fi books.", created: "2025-05-01T10:00:00Z", updated: "2025-05-01T10:00:00Z", verified: null, expires: "2025-11-01T10:00:00Z" },
-      { id: "mem_012", user_id: "default_user", value: "User exercises 3 times per week", category: "habit", confidence: 0.3, source_id: "src_ai", status: "expired", confirmations: 0, contradictions: 0, tags: '["health","exercise","routine"]', explanation: "Old inference that has expired.", created: "2024-06-01T10:00:00Z", updated: "2024-06-01T10:00:00Z", verified: null, expires: "2025-01-01T10:00:00Z" },
+      { id: "mem_001", value: "User lives in Paris, France", category: "location", confidence: 0.85, source_id: "src_user", status: "verified", confirmations: 3, contradictions: 0, tags: '["location","home","paris"]', explanation: "Confirmed by user on multiple occasions.", created: "2025-01-15T10:00:00Z", updated: "2025-06-01T10:00:00Z", verified: "2025-06-01T10:00:00Z", expires: "2026-01-15T10:00:00Z" },
+      { id: "mem_002", value: "User works as a software engineer", category: "identity", confidence: 0.9, source_id: "src_user", status: "verified", confirmations: 4, contradictions: 0, tags: '["work","profession","engineering"]', explanation: "Direct user input confirmed multiple times.", created: "2025-01-20T10:00:00Z", updated: "2025-05-15T10:00:00Z", verified: "2025-05-15T10:00:00Z", expires: null },
+      { id: "mem_003", value: "User enjoys hiking on weekends", category: "preference", confidence: 0.6, source_id: "src_ai", status: "unverified", confirmations: 1, contradictions: 0, tags: '["hobby","outdoor","weekend"]', explanation: "Inferred from conversation.", created: "2025-02-10T10:00:00Z", updated: "2025-02-10T10:00:00Z", verified: null, expires: "2025-08-10T10:00:00Z" },
+      { id: "mem_004", value: "User prefers dark mode interfaces", category: "preference", confidence: 0.75, source_id: "src_system", status: "verified", confirmations: 2, contradictions: 0, tags: '["preference","ui","dark-mode"]', explanation: "Observed from system settings.", created: "2025-02-20T10:00:00Z", updated: "2025-03-10T10:00:00Z", verified: "2025-03-10T10:00:00Z", expires: "2025-08-20T10:00:00Z" },
+      { id: "mem_005", value: "User lives in London, UK", category: "location", confidence: 0.4, source_id: "src_api", status: "conflicting", confirmations: 1, contradictions: 1, tags: '["location","london","uk"]', explanation: "IP geolocation suggests London.", created: "2025-03-01T10:00:00Z", updated: "2025-03-01T10:00:00Z", verified: null, expires: "2025-09-01T10:00:00Z" },
+      { id: "mem_006", value: "User has a cat named Luna", category: "fact", confidence: 0.8, source_id: "src_user", status: "verified", confirmations: 2, contradictions: 0, tags: '["pet","cat","luna"]', explanation: "User explicitly mentioned their cat.", created: "2025-03-15T10:00:00Z", updated: "2025-04-20T10:00:00Z", verified: "2025-04-20T10:00:00Z", expires: null },
+      { id: "mem_007", value: "User is learning Spanish", category: "goal", confidence: 0.5, source_id: "src_ai", status: "unverified", confirmations: 0, contradictions: 0, tags: '["learning","language","spanish"]', explanation: "Inferred from conversation.", created: "2025-04-01T10:00:00Z", updated: "2025-04-01T10:00:00Z", verified: null, expires: "2025-10-01T10:00:00Z" },
+      { id: "mem_008", value: "User avoids processed foods", category: "habit", confidence: 0.35, source_id: "src_ai", status: "unverified", confirmations: 0, contradictions: 1, tags: '["health","diet","food"]', explanation: "Inferred from 2 mentions.", created: "2025-04-10T10:00:00Z", updated: "2025-04-10T10:00:00Z", verified: null, expires: "2025-10-10T10:00:00Z" },
+      { id: "mem_009", value: "User visited Japan in 2024", category: "event", confidence: 0.7, source_id: "src_user", status: "verified", confirmations: 1, contradictions: 0, tags: '["travel","japan","2024"]', explanation: "User mentioned their Japan trip.", created: "2025-04-15T10:00:00Z", updated: "2025-04-15T10:00:00Z", verified: "2025-04-15T10:00:00Z", expires: null },
+      { id: "mem_010", value: "User is 28 years old", category: "fact", confidence: 0.45, source_id: "src_api", status: "conflicting", confirmations: 1, contradictions: 1, tags: '["age","demographics"]', explanation: "Estimated from profile data.", created: "2025-04-20T10:00:00Z", updated: "2025-04-20T10:00:00Z", verified: null, expires: "2025-10-20T10:00:00Z" },
+      { id: "mem_011", value: "User reads science fiction novels", category: "preference", confidence: 0.65, source_id: "src_ai", status: "unverified", confirmations: 0, contradictions: 0, tags: '["reading","sci-fi","books"]', explanation: "Inferred from discussion of sci-fi.", created: "2025-05-01T10:00:00Z", updated: "2025-05-01T10:00:00Z", verified: null, expires: "2025-11-01T10:00:00Z" },
+      { id: "mem_012", value: "User exercises 3 times per week", category: "habit", confidence: 0.3, source_id: "src_ai", status: "expired", confirmations: 0, contradictions: 0, tags: '["health","exercise","routine"]', explanation: "Old inference that expired.", created: "2024-06-01T10:00:00Z", updated: "2024-06-01T10:00:00Z", verified: null, expires: "2025-01-01T10:00:00Z" },
     ];
 
     for (const m of memories) {
-      insertMemory.run(m.id, m.user_id, m.value, m.category, m.confidence, m.source_id,
+      insertMemory.run(m.id, "default_user", m.value, m.category, m.confidence, m.source_id,
         m.status, m.confirmations, m.contradictions, m.tags, m.explanation,
         m.created, m.updated, m.verified, m.expires);
     }
@@ -278,7 +356,7 @@ function seedData(): void {
       { id: "ver_001", mem: "mem_001", action: "confirm", prev: 0.5, next: 0.75, note: "User confirmed location", created: "2025-02-01T10:00:00Z" },
       { id: "ver_002", mem: "mem_001", action: "confirm", prev: 0.75, next: 0.85, note: "User reconfirmed location", created: "2025-06-01T10:00:00Z" },
       { id: "ver_003", mem: "mem_002", action: "confirm", prev: 0.5, next: 0.7, note: "User confirmed profession", created: "2025-03-01T10:00:00Z" },
-      { id: "ver_004", mem: "mem_002", action: "increase_confidence", prev: 0.7, next: 0.9, note: "Consistent with multiple conversations", created: "2025-05-15T10:00:00Z" },
+      { id: "ver_004", mem: "mem_002", action: "increase_confidence", prev: 0.7, next: 0.9, note: "Consistent with conversations", created: "2025-05-15T10:00:00Z" },
       { id: "ver_005", mem: "mem_006", action: "confirm", prev: 0.5, next: 0.8, note: "User confirmed pet ownership", created: "2025-04-20T10:00:00Z" },
     ];
 
