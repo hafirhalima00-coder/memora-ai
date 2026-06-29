@@ -125,9 +125,10 @@ function runTurso(sql: string, params: unknown[]): {
   }
 
   const argsJson = JSON.stringify({ sql, params });
+  const nodePath = path.join(process.cwd(), "node_modules");
   const output = execSync(
     `node "${tmpFile}" '${argsJson.replace(/'/g, "'\\'")}'`,
-    { timeout: 15000, encoding: "utf-8", cwd: process.cwd() }
+    { timeout: 15000, encoding: "utf-8", env: { ...process.env, NODE_PATH: nodePath } }
   );
   return JSON.parse(output);
 }
@@ -141,9 +142,10 @@ function runTursoBatch(statements: { sql: string; params: unknown[] }[]): void {
   }
 
   const argsJson = JSON.stringify({ batch: statements });
+  const nodePath = path.join(process.cwd(), "node_modules");
   execSync(
     `node "${tmpFile}" '${argsJson.replace(/'/g, "'\\'")}'`,
-    { timeout: 30000, encoding: "utf-8", cwd: process.cwd() }
+    { timeout: 30000, encoding: "utf-8", env: { ...process.env, NODE_PATH: nodePath } }
   );
 }
 
