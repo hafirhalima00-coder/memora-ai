@@ -299,7 +299,7 @@ function initializeSchema(): void {
   ];
 
   for (const idx of indexes) {
-    try { db.exec(idx); } catch { /* may already exist */ }
+    try { db.exec(idx); } catch { /* index may already exist, safe to ignore */ }
   }
 }
 

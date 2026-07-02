@@ -46,16 +46,12 @@ next-env.d.ts
 *.db-wal
 *.db-journal
 
-# Environment files with secrets
-.env
-.env.local
-.env.*.local
-
 # IDE
 .vscode/
 .idea/
 *.swp
 *.swo
 
-
-.vercel
+# AI agent config files
+AGENTS.md
+CLAUDE.md

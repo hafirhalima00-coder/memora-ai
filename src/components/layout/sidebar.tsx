@@ -13,7 +13,7 @@ import {
   FileText,
   AlertTriangle,
   CheckCircle2,
-  Timeline,
+  Clock,
   Share2,
   BarChart3,
   Menu,
@@ -28,7 +28,7 @@ const navItems = [
   { href: "/memories", label: "Memories", icon: FileText },
   { href: "/conflicts", label: "Conflicts", icon: AlertTriangle },
   { href: "/verification", label: "Verification", icon: CheckCircle2 },
-  { href: "/timeline", label: "Timeline", icon: Timeline },
+  { href: "/timeline", label: "Timeline", icon: Clock },
   { href: "/graph", label: "Memory Graph", icon: Share2 },
   { href: "/analytics", label: "Analytics", icon: BarChart3 },
 ];

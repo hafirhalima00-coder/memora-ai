@@ -2,6 +2,14 @@
   "name": "memora-ai",
   "version": "1.0.0",
   "private": true,
+  "description": "A trust-aware AI memory system with confidence scores, conflict detection, and memory decay",
+  "author": "Halima Hafir",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hafirhalima00-coder/memora-ai.git"
+  },
+  "keywords": ["ai", "memory", "confidence", "nextjs", "typescript", "sqlite"],
   "scripts": {
     "dev": "next dev",
     "build": "next build",
@@ -44,10 +52,8 @@
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
-    "@vitejs/plugin-react": "^6.0.3",
     "eslint": "^9",
     "eslint-config-next": "16.2.9",
-    "jsdom": "^29.1.1",
     "tailwindcss": "^4",
     "tsx": "^4.22.4",
     "typescript": "^5",

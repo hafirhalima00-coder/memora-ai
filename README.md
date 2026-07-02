@@ -1,6 +1,6 @@
-# Memora AI 🧠
+# Memora AI
 
-A **trust-aware AI memory system** that stores memories with **confidence scores** instead of assuming every remembered fact is always correct. Built for the AI engineering competition.
+A **trust-aware AI memory system** that stores memories with **confidence scores** instead of assuming every remembered fact is always correct.
 
 ```
 ┌─────────────────────────────────────────────────────┐
@@ -16,7 +16,7 @@ A **trust-aware AI memory system** that stores memories with **confidence scores
 └─────────────────────────────────────────────────────┘
 ```
 
-## ✨ Features
+## Features
 
 ### 1. **Memory Dashboard**
 - Total, trusted, unverified, expired, and conflicting memory counts
@@ -74,7 +74,7 @@ A **trust-aware AI memory system** that stores memories with **confidence scores
 - Verification trends
 - Category and source distribution
 
-## 🏗️ Architecture
+## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -111,7 +111,7 @@ A **trust-aware AI memory system** that stores memories with **confidence scores
 └─────────────────────────────────────────────────────────┘
 ```
 
-## 🚀 Getting Started
+## Getting Started
 
 ### Prerequisites
 
@@ -122,7 +122,7 @@ A **trust-aware AI memory system** that stores memories with **confidence scores
 
 ```bash
 # Clone the repository
-git clone <repo-url>
+git clone https://github.com/hafirhalima00-coder/memora-ai.git
 cd memora-ai
 
 # Install dependencies
@@ -148,13 +148,13 @@ npm start
 docker compose up --build
 ```
 
-## 🧪 Running Tests
+## Running Tests
 
 ```bash
 npm test
 ```
 
-## 🐳 Docker Support
+## Docker Support
 
 ```bash
 # Build the image
@@ -170,7 +170,7 @@ The Docker setup includes:
 - Persistent SQLite data volume
 - Health checks
 
-## 🔄 GitHub Actions CI
+## GitHub Actions CI
 
 The CI pipeline (`./.github/workflows/ci.yml`) runs on every push and PR:
 
@@ -178,7 +178,7 @@ The CI pipeline (`./.github/workflows/ci.yml`) runs on every push and PR:
 2. **Build** - Next.js production build
 3. **Test** - Vitest test suite
 
-## 🗄️ Database Schema
+## Database Schema
 
 ```sql
 -- Sources of memory data
@@ -234,7 +234,7 @@ CREATE TABLE verification_events (
 );
 ```
 
-## 🧠 How the Confidence Engine Works
+## How the Confidence Engine Works
 
 ```
                           ┌─────────────────────┐
@@ -268,7 +268,7 @@ CREATE TABLE verification_events (
 └─────────────────┘
 ```
 
-## 📊 Confidence Levels
+## Confidence Levels
 
 | Level | Range | Color |
 |-------|-------|-------|
@@ -278,7 +278,7 @@ CREATE TABLE verification_events (
 | Low | 30-49% | Orange |
 | Very Low | 0-29% | Red |
 
-## 🛠️ Tech Stack
+## Tech Stack
 
 | Technology | Purpose |
 |------------|---------|
@@ -291,7 +291,7 @@ CREATE TABLE verification_events (
 | **Vitest** | Unit testing |
 | **Docker** | Containerization |
 
-## 🚀 Vercel Deployment
+## Vercel Deployment
 
 For Vercel deployment, replace `better-sqlite3` with **Turso** (serverless SQLite) or use **Neon** (serverless Postgres):
 
@@ -302,7 +302,7 @@ npm install @libsql/client
 
 Update the database connection layer to use the libsql client, and set `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN` environment variables in Vercel.
 
-## 📁 Project Structure
+## Project Structure
 
 ```
 src/
@@ -333,10 +333,10 @@ src/
 │   └── api-client.ts     # Client-side API wrapper
 ```
 
-## 📝 License
+## License
 
 MIT
 
 ---
 
-> **build by Halima Hafir**
+> **built by Halima Hafir**
